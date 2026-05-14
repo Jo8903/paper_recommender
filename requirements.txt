@@ -1,4 +1,5 @@
-huggingface-transformers
-pytorch
+torch
 numpy
 pandas
+matplotlib
+transformers
