@@ -1,5 +1,9 @@
-torch
 numpy
 pandas
-matplotlib
+scikit-learn
+sentence-transformers
 transformers
+torch
+peft
+tqdm
+kagglehub
