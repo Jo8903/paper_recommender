@@ -99,7 +99,7 @@ def load_dataset():
 _last_llm_call: float = 0.0
 _MIN_CALL_INTERVAL = 13.0  # seconds between calls (free tier: 5 RPM = 12s minimum)
 
-def call_llm(system: str, messages: list[dict], model: str = "gemini-2.0-flash") -> str:
+def call_llm(system: str, messages: list[dict], model: str = "gemini-2.5-flash") -> str:
     global _last_llm_call
     # Throttle: wait if last call was too recent
     elapsed = time.time() - _last_llm_call
@@ -213,13 +213,13 @@ def generate_report(
     actions = []
 
     if wants_summary:
-        summ = summarise_findings(query, rec["advanced_recommendations"], tfidf_vec, terms, classifier)
+        summ = summarise_findings(query, rec["advanced_recommendations"], tfidf_vec, terms, classifier, paper_text=paper_text)
         result["summary"] = summ["advanced"]
         actions.append("summarised the paper" if paper_text else "summarised the relevant findings")
 
     if wants_gaps:
         gaps = identify_research_gaps(
-            query, rec["advanced_recommendations"], df, tfidf_vec, terms, classifier
+            query, rec["advanced_recommendations"], df, tfidf_vec, terms, classifier, paper_text=paper_text
         )
         result["gaps"] = gaps["advanced_gaps"]
         actions.append("identified the research gaps")
@@ -308,29 +308,33 @@ def summarise_findings(
     tfidf_vec: TfidfVectorizer,
     terms: np.ndarray,
     classifier: Pipeline,
+    paper_text: str = "",
 ) -> dict:
-    """
-    Summarise findings using:
-    - Basic: TextRank extractive summarisation
-    - Advanced: Instruction prompt assisted by TextRank key sentences
-    Basic output feeds into advanced — TextRank sentences act as anchors
-    so the LLM focuses on the most central content.
-    """
-    # Step 1 — Basic: TextRank extracts most central sentences
-    combined_text  = " ".join(results["abstract"].tolist())
-    basic_summary  = _textrank_summary(combined_text, n=3)
-
-    # Step 2 — Advanced: inject TextRank output into enriched context
-    # so the LLM uses basic-extracted sentences as a starting point
-    enriched_ctx = _build_enriched_context(query, results, tfidf_vec, terms, classifier)
-    assisted_ctx = (
-        f"{enriched_ctx}\n\n"
-        f"[Key sentences pre-extracted by TextRank]\n{basic_summary}"
-    )
-    advanced_summary = call_llm(
-        system="You are an expert academic research assistant.",
-        messages=[{"role": "user", "content": _instruction_prompt(query, assisted_ctx)}],
-    )
+    if paper_text:
+        basic_summary = _textrank_summary(paper_text, n=3)
+        prompt = (
+            f"Summarise the following research paper.\n\n"
+            f"[FORMAT]\n## Summary\n<3-4 sentences covering the main theme, methods, and key findings>\n\n"
+            f"[CONSTRAINTS]\n- Only use information from the paper.\n- Be specific about contributions and results.\n\n"
+            f"[Key sentences pre-extracted by TextRank]\n{basic_summary}\n\n"
+            f"[PAPER CONTENT]\n{paper_text[:4000]}"
+        )
+        advanced_summary = call_llm(
+            system="You are an expert academic research assistant.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+    else:
+        combined_text = " ".join(results["abstract"].tolist())
+        basic_summary = _textrank_summary(combined_text, n=3)
+        enriched_ctx = _build_enriched_context(query, results, tfidf_vec, terms, classifier)
+        assisted_ctx = (
+            f"{enriched_ctx}\n\n"
+            f"[Key sentences pre-extracted by TextRank]\n{basic_summary}"
+        )
+        advanced_summary = call_llm(
+            system="You are an expert academic research assistant.",
+            messages=[{"role": "user", "content": _instruction_prompt(query, assisted_ctx)}],
+        )
 
     return {"basic": basic_summary, "advanced": advanced_summary}
 
@@ -343,29 +347,30 @@ def identify_research_gaps(
     tfidf_vec: TfidfVectorizer,
     terms: np.ndarray,
     classifier: Pipeline,
+    paper_text: str = "",
 ) -> dict:
-    """
-    Identify research gaps using:
-    - Basic: classification + domain keyword comparison
-    - Advanced: Chain-of-Thought prompting
-    """
-    query_domain  = classifier.predict([_preprocess(query)])[0]
-    domain_papers = df[df["primary_category"] == query_domain]
+    source_text = paper_text if paper_text else query
+    query_domain = classifier.predict([_preprocess(source_text)])[0]
 
+    domain_papers = df[df["primary_category"] == query_domain]
     domain_tfidf  = TfidfVectorizer(max_features=5000, ngram_range=(1, 1), min_df=2)
     domain_matrix = domain_tfidf.fit_transform(domain_papers["clean_text"])
     domain_scores = np.asarray(domain_matrix.mean(axis=0)).ravel()
     domain_terms  = np.array(domain_tfidf.get_feature_names_out())
     top_domain_kw = set(domain_terms[domain_scores.argsort()[-30:][::-1]])
 
-    vec       = tfidf_vec.transform([_preprocess(query)])
-    row       = vec.toarray().ravel()
-    query_kw  = set(terms[row.argsort()[-20:][::-1]].tolist()) if row.sum() else set()
+    vec      = tfidf_vec.transform([_preprocess(source_text)])
+    row      = vec.toarray().ravel()
+    query_kw = set(terms[row.argsort()[-20:][::-1]].tolist()) if row.sum() else set()
     basic_gaps = sorted(top_domain_kw - query_kw)[:10]
 
-    enriched_ctx  = _build_enriched_context(query, results, tfidf_vec, terms, classifier)
-    assisted_ctx  = (
-        f"{enriched_ctx}\n\n"
+    if paper_text:
+        context = f"Paper content:\n{paper_text[:3000]}"
+    else:
+        context = _build_enriched_context(query, results, tfidf_vec, terms, classifier)
+
+    assisted_ctx = (
+        f"{context}\n\n"
         f"[Keyword-level gaps pre-identified by TF-IDF domain comparison]\n"
         f"{', '.join(basic_gaps)}"
     )

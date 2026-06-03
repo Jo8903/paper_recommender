@@ -187,7 +187,7 @@ if st.session_state.is_thinking:
     if not os.environ.get("GEMINI_API_KEY"):
         st.session_state.chat_history.append({
             "role": "assistant",
-            "content": "No API key found. Please enter your Gemini API key in the sidebar on the left.",
+            "content": "No API key found. Please add your Gemini API key to the .env file.",
         })
         st.session_state.is_thinking = False
         st.session_state.pending_query = ""
